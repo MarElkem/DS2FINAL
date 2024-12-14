@@ -1,0 +1,228 @@
+
+```{r}
+#Import relevanT libraries
+library(dplyr)
+library(widyr)
+library(tidyverse)
+library(stringr)
+library(tidytext)
+library(DataEditR)
+library(tidyr)
+library(polite)
+library(billboard)
+library(knitr)
+library(sentimentr)
+library(rvest)
+
+
+```
+
+Below are the data cleaning steps for both the Tupac and Kendrick datasets which are then joined at the end.
+
+
+## Loading data 
+```{r}
+kendrick_data <- read_csv("~/ds2final/kendrick_data1.csv")
+curse_words <- read_csv("~/ds2final/curse_words.csv")
+```
+
+
+## Scraping sales
+```{r}
+# check that scraping is allowed (Step 0)
+robotstxt::paths_allowed("https://bestsellingalbums.org/artist/6902")
+
+# Step 1: Download the HTML and turn it into an XML file with read_html()
+sales <- read_html("https://bestsellingalbums.org/artist/6902") %>% 
+  html_nodes(".sales") %>% 
+  html_text()
+```
+
+```{r}
+session <- bow("https://bestsellingalbums.org/artist/6902", force = TRUE)
+
+sales_value <- scrape(session) |>
+  html_nodes(".sales") |>
+  html_text()
+sales_value
+
+sales_album <- scrape(session) |>
+  html_nodes(".album a") |>
+  html_text()
+sales_album
+
+sales_final <- tibble(sales = sales_value, 
+                    album = sales_album)
+sales_final
+```
+
+```{r}
+#Manually add in year to the sales final dataset.
+sales_final <- sales_final %>%
+  mutate(sales = str_remove_all(sales, "(?i)sales: |,|[^0-9]"),
+         album = str_remove(album, "\\s*\\(\\d{4}\\)"), #remove year in parenthesis
+         album = str_to_lower(album),
+         year = case_when(
+           album == "section.80" ~ 2011,
+           album == "good kid, m.a.a.d. city" ~ 2012,
+           album == "to pimp a butterfly" ~ 2015,
+           album == "damn." ~ 2017,
+           album == "mr. morale & the big steppers" ~ 2022,
+           album == "untitled unmastered." ~ 2016))
+
+sales_final
+```
+
+
+## Using str_functions and regular expressions, tidy the data and remove cusswords
+```{r}
+tidy_lyrics <- kendrick_data %>%
+  filter(!album %in% c("Overly Dedicated", "Diss Tracks")) %>%
+  unnest_tokens(word, lyrics) %>% #separate lyrics by word
+  anti_join(curse_words) %>% 
+  filter(!word %in% stop_words$word) %>% #filter out stop words and create n 
+  group_by(word) %>% 
+  mutate(n = n()) %>% 
+  distinct()
+
+tidy_lyrics
+```
+
+
+```{r}
+joined_lyrics <- tidy_lyrics %>%
+   mutate(album = str_to_lower(album)) %>%
+  left_join(sales_final, by = "album") %>% 
+  filter(!album %in% c("overly dedicated", "diss tracks"))
+
+joined_lyrics
+```
+
+```{r}
+kendrick_final <- joined_lyrics %>% 
+  mutate(across(everything(), ~ str_to_lower(.))) %>% #change all to lower case
+  filter(!str_detect(word, "\\d"), #remove all words that contain numbers
+         !str_detect(word, "[^a-zA-Z0-9 ]"), #remove all words that contain anything not a letter or number
+         str_length(word) > 3) #keep words longer than 3 letters 
+  
+kendrick_final
+```
+
+```{r}
+kendrick_final <- kendrick_final %>% 
+  mutate(year = as.numeric(format(as.Date(release_date), "%Y"))) %>% 
+  select(-release_date)
+
+kendrick_final
+```
+
+#Cleaning 2Pac dataset
+```{r}
+#Read the data, and create a dictionary with regular expressions of cuss-words to filter out later.
+tupac_untidy <- read.csv("~/Sds 264 F24/final/pac.csv")
+cuss <- read.csv("~/Sds 264 F24/cuss2.csv")
+cuss_words_pattern <- paste0("\\b(", paste(cuss$word, collapse = "|"), ")\\b") 
+```
+
+```{r}
+#Scrape data to get sales: 
+url <- "https://en.wikipedia.org/wiki/Tupac_Shakur_discography"
+
+session <- bow(url)
+
+page <- scrape(session)
+tables <- page |> 
+  html_nodes("table") |> 
+  html_table(fill = TRUE)
+
+
+studio_albums <- tables[[2]]
+post_albums <- tables[[3]]
+comp_albums <- tables[[5]]
+soundtrack <- tables[[7]]
+
+all_albums <- bind_rows(studio_albums, post_albums, comp_albums, soundtrack)
+
+```
+
+```{r}
+#combine with sales
+tupac_sales <- tupac_untidy |> 
+  left_join(all_albums |> select(Title, Sales), 
+            by = c("Album" = "Title"))
+
+tupac_sales |> #find out where album names simply did not match up
+  filter(is.na(Sales)) |> 
+  distinct(Album)
+
+#manually add the sales 
+tupac_final <- tupac_sales |> 
+  filter(Album != "Hip-Hop Classics 1996") # this album contains too many other artists
+
+tupac_final <- tupac_sales |> 
+  mutate(Sales = as.numeric(Sales)) |> 
+  mutate(Sales = case_when(
+    Album == "All Eyez On Me" ~ 5887630,
+    Album == "Me Against The World" ~ 3524567,
+    Album == "Strictly 4 My" ~ 1639584,
+    Album == "R U Still Down?" ~ 2166117,
+    Album == "The Don Killumanati" ~ 3911787,
+    Album == "Until The End Of Time" ~ 2220589,
+    Album == "Loyal To The Game" ~ 1204124,
+    Album == "Movie" ~ 1666335,
+    Album == "Greatest Hits" ~ 5330000,
+    Album == "Better Dayz" ~ 1765597,
+    Album == "2Pacalypse Now" ~ 923455,
+    Album == "Pac's Life" ~ 500000,
+    TRUE ~ Sales
+  ))
+
+
+tupac_final |>#double check any more NAs
+  filter(is.na(Sales)) |> 
+  distinct(Album)
+
+```
+
+```{r}
+write.csv(tupac_final, "./tupac_final.csv")
+```
+
+
+```{r}
+#Create an unnested version of the dataset using str functions and regular expressions
+tupac_sep <- tupac_final |> 
+  unnest_tokens(word, Lyrics) |> 
+  anti_join(cuss, by = "word") |> 
+  group_by(word) |>  
+  mutate(n = n()) |> 
+  distinct()
+
+tupac_tidy <- tupac_final |> 
+  mutate(Lyrics = str_replace_all(Lyrics, "\\n", " ")) 
+
+
+
+```
+
+```{r}
+kendrick <- read_csv("~/Sds 264 F24/final/kendrick_final.csv")
+
+  
+
+```
+
+#Combine both datasets 
+```{r}
+kendrick <- kendrick |> rename(word = words)
+
+kendrick_pac_final <- bind_rows(tupac_sep, kendrick)
+write.csv(kendrick_pac_final, "./kendrick_pac_final.csv")
+
+```
+```{r}
+write.csv(tupac_sep, "./tupac_final2.csv")
+
+```
+
+
